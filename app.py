@@ -1,197 +1,184 @@
-import pandas as pd
-import plotly.graph_objects as go
-from pathlib import Path
-from flask import Flask, render_template_string
-import datetime
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime, time
 import os
+import re
+from pathlib import Path
+import schedule
+import time
+import pytz
 
-app = Flask(__name__)
+# Конфигурационные параметры
+PRODUCT_URL = "https://store77.net/apple_ipad_pro_11_m4_2024/planshet_apple_ipad_pro_11_m4_2024_512gb_wi_fi_serebristyy/"
+PRICE_FILE = Path("C:/price_tracking/ipad_price_history.txt")  # Путь к файлу на диске C
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+}
+SAVE_TIME = "23:59"  # Время сохранения (по Москве)
 
-def generate_chart():
-    # Ваш код обработки данных
-    file_path = Path("C:/price_tracking/ipad_price_history.txt")
-    
-    data = []
-    with open(file_path, 'r', encoding='utf-8') as file:
-        for line in file:
-            parts = line.strip().split(' - ')
-            if len(parts) == 2:
-                date_str, price_str = parts[0].split()[0], parts[1]
-                date = pd.to_datetime(date_str, format='%d.%m.%Y').date()
-                price = float(price_str.replace(' руб.', '').replace(' ', ''))
-                data.append({'date': date, 'price': price})
+def setup_price_file():
+    """Создает файл и директорию при необходимости"""
+    try:
+        PRICE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not PRICE_FILE.exists():
+            PRICE_FILE.touch()
+            print(f"Создан новый файл для хранения цен: {PRICE_FILE}")
+    except Exception as e:
+        print(f"Ошибка при создании файла: {e}")
+        return False
+    return True
 
-    df = pd.DataFrame(data)
-    df = df.groupby('date').last().reset_index()
-    df = df.sort_values('date')
-    df['date'] = pd.to_datetime(df['date'])
-
-    df['price_diff'] = df['price'].diff()
-    df['color'] = df['price_diff'].apply(lambda x: 'green' if x < 0 else ('red' if x > 0 else 'gray'))
-
-    fig = go.Figure()
-
-    # Конфигурация графика (как в вашем коде)
-    base_dpi = 96
-    cm_to_inch = 0.393701
-    target_cm = 5
-    px_per_day = target_cm * cm_to_inch * base_dpi
-
-    for i in range(len(df)):
-        fig.add_trace(go.Scatter(
-            x=[df['date'].iloc[i]],
-            y=[df['price'].iloc[i]],
-            mode='markers+text',
-            text=[f"{df['price'].iloc[i]:,.0f} руб."],
-            textposition='top center',
-            marker=dict(size=10, color=df['color'].iloc[i] if i > 0 else 'gray'),
-            showlegend=False
-        ))
+def extract_price(html):
+    """Извлекает цену из HTML страницы"""
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
         
-        if i > 0:
-            fig.add_trace(go.Scatter(
-                x=[df['date'].iloc[i-1], df['date'].iloc[i]],
-                y=[df['price'].iloc[i-1], df['price'].iloc[i]],
-                mode='lines',
-                line=dict(width=2, color=df['color'].iloc[i]),
-                showlegend=False
-            ))
-
-            diff = df['price_diff'].iloc[i]
-            if not pd.isna(diff):
-                fig.add_annotation(
-                    x=df['date'].iloc[i-1] + (df['date'].iloc[i] - df['date'].iloc[i-1])/2,
-                    y=(df['price'].iloc[i-1] + df['price'].iloc[i])/2,
-                    text=f"{diff:+,.0f} руб.",
-                    showarrow=False,
-                    font=dict(color=df['color'].iloc[i], size=12),
-                    yshift=10
-                )
-
-    fig.update_layout(
-        title='Динамика изменения цены iPad',
-        xaxis=dict(
-            tickmode='array',
-            tickvals=df['date'],
-            tickformat='%d.%m.%Y',
-            type='date',
-            title='Дата',
-            tickangle=45
-        ),
-        yaxis=dict(
-            range=[0, df['price'].max() * 1.2],
-            title='Цена (руб.)'
-        ),
-        template='plotly_white',
-        width=px_per_day * (len(df)-1) + 200,
-        height=600,
-        margin=dict(l=50, r=50, b=100, t=100)
-    )
-
-    fig.update_xaxes(
-        dtick="D1",
-        ticktext=df['date'].dt.strftime('%d.%m.%Y').tolist(),
-        tickvals=df['date']
-    )
-
-    return fig.to_html(full_html=False), df
-
-@app.route('/')
-def index():
-    plot_html, df = generate_chart()
-    
-    # Рассчитываем статистику
-    current_price = f"{df['price'].iloc[-1]:,.0f}".replace(",", " ")
-    price_change = f"{df['price'].iloc[-1] - df['price'].iloc[0]:+,.0f}".replace(",", " ")
-    price_change_color = 'green' if (df['price'].iloc[-1] - df['price'].iloc[0]) < 0 else 'red'
-    days_tracked = (df['date'].iloc[-1] - df['date'].iloc[0]).days
-    last_update = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
-    
-    # HTML шаблон с улучшенным дизайном
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html lang="ru">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Анализатор цен на iPad</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        <style>
-            .chart-container {
-                background: white;
-                border-radius: 10px;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-                padding: 25px;
-                margin-top: 20px;
-            }
-            .stat-card {
-                border-radius: 8px;
-                padding: 15px;
-                margin-bottom: 15px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-            }
-            .price-up {
-                color: #dc3545;
-            }
-            .price-down {
-                color: #28a745;
-            }
-            .last-update {
-                font-size: 0.9rem;
-                color: #6c757d;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container py-4">
-            <div class="text-center mb-4">
-                <h1 class="display-5">Анализатор цен на iPad</h1>
-                <p class="text-muted">Динамика изменения цен с детализацией по дням</p>
-            </div>
-            
-            <div class="row">
-                <div class="col-md-4">
-                    <div class="stat-card bg-light">
-                        <h5>Текущая цена</h5>
-                        <p class="fs-3">{{ current_price }} руб.</p>
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="stat-card bg-light">
-                        <h5>Изменение цены</h5>
-                        <p class="fs-3 {{ 'price-down' if price_change_color == 'green' else 'price-up' }}">
-                            {{ price_change }} руб.
-                        </p>
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="stat-card bg-light">
-                        <h5>Период анализа</h5>
-                        <p class="fs-3">{{ days_tracked }} дней</p>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="chart-container">
-                {{ plot_html|safe }}
-            </div>
-            
-            <div class="text-end mt-2 last-update">
-                Данные актуальны на: {{ last_update }}
-            </div>
-        </div>
+        # 1. Поиск в атрибуте onClick
+        onclick_elements = soup.find_all(attrs={"onclick": True})
+        for element in onclick_elements:
+            if 'YandexEcommerce.getInstance().click' in element.get('onclick', ''):
+                match = re.search(r'"price":(\d+)', element['onclick'])
+                if match:
+                    return int(match.group(1))
         
-        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    </body>
-    </html>
-    ''', 
-    plot_html=plot_html,
-    current_price=current_price,
-    price_change=price_change,
-    price_change_color=price_change_color,
-    days_tracked=days_tracked,
-    last_update=last_update)
+        # 2. Поиск в JavaScript блоках
+        for script in soup.find_all('script'):
+            if script.string and 'YandexEcommerce' in script.string:
+                match = re.search(r'"price":(\d+)', script.string)
+                if match:
+                    return int(match.group(1))
+        
+        # 3. Альтернативные методы поиска
+        price_elements = [
+            soup.find(attrs={'data-price': True}),
+            soup.find('span', class_='price'),
+            soup.find('div', class_='product-price')
+        ]
+        
+        for element in price_elements:
+            if element:
+                price_text = element.get_text(strip=True) or element.get('content', '')
+                if price_text:
+                    cleaned = re.sub(r'[^\d]', '', price_text)
+                    if cleaned:
+                        return int(cleaned)
+        
+        return None
+    except Exception as e:
+        print(f"Ошибка при парсинге цены: {e}")
+        return None
 
-if __name__ == '__main__':
-   if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0')
+def save_price_to_file(price):
+    """Сохраняет цену в текстовый файл"""
+    try:
+        moscow_tz = pytz.timezone('Europe/Moscow')
+        timestamp = datetime.now(moscow_tz).strftime("%d.%m.%Y %H:%M:%S")
+        price_line = f"{timestamp} - {price:,} руб.\n".replace(",", " ")
+        
+        # Проверяем последнюю запись
+        last_entry = ""
+        if PRICE_FILE.exists() and os.path.getsize(PRICE_FILE) > 0:
+            with open(PRICE_FILE, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                if lines:
+                    last_entry = lines[-1]
+        
+        # Проверяем, не сохраняли ли уже сегодня
+        today_date = timestamp.split()[0]
+        if today_date in last_entry:
+            print(f"Цена за {today_date} уже сохранена")
+            return False
+        
+        # Добавляем новую запись
+        with open(PRICE_FILE, 'a', encoding='utf-8') as f:
+            f.write(price_line)
+        
+        print(f"Цена успешно сохранена в файл: {PRICE_FILE}")
+        return True
+    except Exception as e:
+        print(f"Ошибка при сохранении в файл: {e}")
+        return False
+
+def get_price_change():
+    """Возвращает изменение цены по сравнению с предыдущей записью"""
+    try:
+        if not PRICE_FILE.exists() or os.path.getsize(PRICE_FILE) < 2:
+            return None
+        
+        with open(PRICE_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            if len(lines) < 2:
+                return None
+            
+            # Получаем последнюю и предпоследнюю цены
+            last_price = int(re.sub(r'[^\d]', '', lines[-1].split('-')[1].strip()))
+            prev_price = int(re.sub(r'[^\d]', '', lines[-2].split('-')[1].strip()))
+            
+            return last_price - prev_price
+    except Exception as e:
+        print(f"Ошибка при сравнении цен: {e}")
+        return None
+
+def daily_price_check():
+    """Ежедневная проверка и сохранение цены"""
+    try:
+        print(f"\n[{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}] Запуск ежедневной проверки цены...")
+        
+        # Получаем HTML страницы
+        response = requests.get(PRODUCT_URL, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        
+        # Извлекаем цену
+        price = extract_price(response.text)
+        if price is None:
+            print("Не удалось определить цену товара")
+            return
+        
+        print(f"Текущая цена: {price:,} руб.".replace(",", " "))
+        
+        # Сохраняем цену
+        if save_price_to_file(price):
+            # Анализируем изменение цены
+            change = get_price_change()
+            if change is not None:
+                if change > 0:
+                    print(f"↑ Цена выросла на {change:,} руб.".replace(",", " "))
+                elif change < 0:
+                    print(f"↓ Цена снизилась на {abs(change):,} руб.".replace(",", " "))
+                else:
+                    print("→ Цена не изменилась")
+    
+    except requests.RequestException as e:
+        print(f"Ошибка при загрузке страницы: {e}")
+    except Exception as e:
+        print(f"Неожиданная ошибка: {e}")
+
+def schedule_daily_check():
+    """Настраивает ежедневную проверку по расписанию"""
+    moscow_tz = pytz.timezone('Europe/Moscow')
+    
+    # Запланировать ежедневную проверку
+    schedule.every().day.at(SAVE_TIME, moscow_tz).do(daily_price_check)
+    
+    print(f"Мониторинг цен запущен. Ежедневное сохранение в {SAVE_TIME} по Москве")
+    print("Для остановки нажмите Ctrl+C\n")
+    
+    # Первая проверка при запуске
+    daily_price_check()
+    
+    # Бесконечный цикл для работы планировщика
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+if __name__ == "__main__":
+    if not setup_price_file():
+        exit()
+    
+    try:
+        schedule_daily_check()
+    except KeyboardInterrupt:
+        print("\nМониторинг цен остановлен")
+    except Exception as e:
+        print(f"Критическая ошибка: {e}")
